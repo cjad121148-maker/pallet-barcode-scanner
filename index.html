@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>팔레트 실시간 바코드 스캔</title>
+<style>
+*{box-sizing:border-box}body{margin:0;padding:16px;background:#0b1821;color:#fff;font:15px/1.5 system-ui,'Malgun Gothic',sans-serif}
+main{max-width:600px;margin:0 auto}h1{font-size:20px;margin:4px 0 10px}p{margin:8px 0}
+.frame{position:relative;border:2px solid #6bd2e8;border-radius:12px;overflow:hidden;background:#101010;min-height:260px}
+video{display:block;width:100%;max-height:67vh;object-fit:cover;aspect-ratio:3/4}
+.finder{position:absolute;inset:38% 7%;border:2px solid rgba(123,238,255,.9);border-radius:9px;pointer-events:none;box-shadow:0 0 0 100vmax rgba(0,0,0,.08)}
+.status{padding:14px;background:#173243;border-radius:9px;margin:12px 0;min-height:70px;overflow-wrap:anywhere}
+.btns{display:flex;gap:8px;flex-wrap:wrap}button{border:0;border-radius:9px;padding:13px 16px;background:#d0f4fb;color:#0f2b3a;font:inherit;font-weight:700;min-height:47px;flex:1}
+button:disabled{opacity:.5}.code{font-size:24px;font-weight:800;word-break:break-all;padding:10px;border:1px solid #6bd2e8;border-radius:8px;margin:12px 0}
+small{display:block;color:#bdd5e0;margin:10px 0}
+</style>
+
+</head>
+<body>
+<main>
+<h1>실시간 바코드 스캔 v43</h1>
+<p>카메라가 켜지면 바코드를 중앙 사각형 안에 맞춰주세요. 촬영 버튼 없이 자동 인식합니다.</p>
+<div class="frame"><video id="preview" muted playsinline autoplay></video><div class="finder"></div></div>
+<div class="status" id="status" role="status" aria-live="polite">카메라 준비 중...</div>
+<div class="code" id="value" hidden></div>
+<div class="btns"><button type="button" id="start">카메라 시작 / 다시 스캔</button><button type="button" id="copy" hidden>인식번호 복사</button><button type="button" id="close">닫기</button></div>
+<small>인식번호는 원래 웹앱으로 전달합니다. 모바일 브라우저가 창 간 통신을 제한하면 ‘인식번호 복사’를 사용해 주세요. 스캐너 페이지는 번호를 서버에 저장하지 않습니다. 휴대폰 브라우저에서 카메라 권한을 허용해야 합니다.</small>
+</main>
+<script>
+'use strict';
+const params=new URLSearchParams(location.search);
+const token=params.get('nonce')||'';
+const returnOrigin=params.get('targetOrigin')||'';
+let reader=null,controls=null,nativeStream=null,nativeTimer=0,active=false,completed=false,rawCode='';
+let zxingLoader=null;
+const $=id=>document.getElementById(id);
+function status(s){$('status').textContent=s;}
+function stop(){try{controls?.stop();}catch(e){}controls=null;
+ clearTimeout(nativeTimer);nativeTimer=0;
+ if(nativeStream){nativeStream.getTracks().forEach(track=>track.stop());nativeStream=null;}
+ const v=$('preview');if(v.srcObject){v.srcObject.getTracks().forEach(track=>track.stop());v.srcObject=null;}active=false;}
+function loadZXing(){
+ if(window.ZXingBrowser?.BrowserMultiFormatReader)return Promise.resolve();
+ if(zxingLoader)return zxingLoader;
+ zxingLoader=new Promise((resolve,reject)=>{
+  const script=document.createElement('script');script.src='https://cdn.jsdelivr.net/npm/@zxing/browser@0.2.1/umd/zxing-browser.min.js';
+  script.onload=()=>window.ZXingBrowser?.BrowserMultiFormatReader?resolve():reject(Error('ZXing 라이브러리를 찾을 수 없습니다.'));
+  script.onerror=()=>{
+    const fallback=document.createElement('script');fallback.src='https://unpkg.com/@zxing/browser@0.2.1/umd/zxing-browser.min.js';
+    fallback.onload=()=>window.ZXingBrowser?.BrowserMultiFormatReader?resolve():reject(Error('스캐너 엔진 실행 실패'));
+    fallback.onerror=()=>reject(Error('바코드 인식 라이브러리 연결이 차단됐습니다. 사내 네트워크 설정을 확인해 주세요.'));
+    document.head.appendChild(fallback);
+  };
+  document.head.appendChild(script);
+ }).catch(e=>{zxingLoader=null;throw e;});
+ return zxingLoader;
+}
+async function tryNative(){
+ if(typeof BarcodeDetector==='undefined')return false;
+ const wanted=['ean_13','ean_8','code_128','code_39','itf','upc_a','upc_e','codabar'];
+ let supported=[];try{supported=await BarcodeDetector.getSupportedFormats();}catch(e){}
+ const formats=wanted.filter(x=>supported.includes(x));
+ if(!formats.length)return false;
+ const detector=new BarcodeDetector({formats});
+ nativeStream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'},width:{ideal:1280}},audio:false});
+ const video=$('preview');video.srcObject=nativeStream;await video.play();
+ active=true;
+ const scan=async()=>{
+  if(!active||completed)return;
+  try{const hits=await detector.detect(video);if(hits&&hits[0]?.rawValue){onCode(hits[0].rawValue);return;}}catch(e){}
+  if(active&&!completed)nativeTimer=setTimeout(scan,115);
+ };
+ scan();return true;
+}
+function send(value){
+ let delivered=false;
+ if(window.opener&&token&&/^https:\/\//i.test(returnOrigin)){
+  const host=new URL(returnOrigin).hostname;
+  if(!(host==='script.google.com'||host==='script.googleusercontent.com'||host.endsWith('.googleusercontent.com')))return false;
+  try{window.opener.postMessage({type:'PALLET_BARCODE_SCAN_V30',nonce:token,value},returnOrigin);delivered=true;}catch(e){}
+ }
+ return delivered;
+}
+function onCode(value){
+ const code=String(value||'').trim();if(completed||!code)return;
+ completed=true;rawCode=code;stop();
+ $('value').hidden=false;$('value').textContent=code;
+ $('copy').hidden=false;
+ if(navigator.vibrate)try{navigator.vibrate(80);}catch(e){}
+ const success=send(code);
+ status(success?'인식 완료 · 원래 작업 화면에 코드를 전송했습니다.':'인식 완료 · 원래 화면으로 자동 전송할 수 없는 환경입니다. 아래 번호를 복사해 입력해 주세요.');
+ if(success)setTimeout(()=>{try{window.close();}catch(e){}},1200);
+}
+async function start(){
+ stop();completed=false;rawCode='';$('value').hidden=true;$('copy').hidden=true;
+ if(!navigator.mediaDevices?.getUserMedia){status('현재 브라우저에서 카메라 접근이 불가능합니다. HTTPS 주소인지 확인하고 Safari/Chrome에서 열어 주세요.');return;}
+ $('start').disabled=true;
+ status('후면 카메라 연결 중...');
+ try{
+  let nativeStarted=false;
+  try{nativeStarted=await tryNative();}catch(e){stop();}
+  if(!nativeStarted){
+    status('바코드 인식 엔진 연결 중...');
+    await loadZXing();
+    reader=new ZXingBrowser.BrowserMultiFormatReader();
+    active=true;
+    controls=await reader.decodeFromConstraints({video:{facingMode:{ideal:'environment'},width:{ideal:1280},height:{ideal:720}},audio:false},$('preview'),(result,error)=>{
+      if(result){let value='';try{value=result.getText();}catch(e){value=result.text||'';}onCode(value);}
+    });
+  }
+  if(completed)stop();else status('스캔 중 · 바코드를 중앙 사각형 안에 비추세요.');
+ }catch(e){stop();status('카메라 시작 실패: '+(e?.message||String(e))+' · 카메라 권한, HTTPS, 외부 라이브러리 접근을 확인해 주세요.');}
+ finally{$('start').disabled=false;}
+}
+$('start').onclick=start;
+$('close').onclick=()=>{stop();window.close();};
+$('copy').onclick=async()=>{
+ try{await navigator.clipboard.writeText(rawCode);status('인식번호를 복사했습니다. 원래 화면의 바코드 입력칸에 붙여넣으세요.');}
+ catch(e){const sel=window.getSelection(),range=document.createRange();range.selectNodeContents($('value'));sel.removeAllRanges();sel.addRange(range);status('번호가 선택되었습니다. 복사한 후 원래 화면에 붙여넣으세요.');}
+};
+window.addEventListener('pagehide',stop);
+window.addEventListener('load',start);
+</script>
+</body></html>
